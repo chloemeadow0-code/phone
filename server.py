@@ -401,6 +401,170 @@ async def phone_keep_awake(enabled):
     resp = await send_command("keepAwake", {"enabled": enabled})
     return resp.get("status", "unknown")
 
+@mcp.tool()
+async def phone_find_elements(text="", class_name="", clickable_only=False):
+    """
+    从无障碍树中搜索元素，返回匹配的节点列表（含坐标）。
+    text: 按文字内容匹配（模糊）
+    class_name: 按类名匹配，如 android.widget.Button
+    clickable_only: 只返回可点击的元素
+    """
+    resp = await send_command("getState", {})
+    result = resp.get("result", "")
+    if isinstance(result, str):
+        try:
+            tree = json.loads(result)
+        except Exception:
+            return "无法解析无障碍树"
+    else:
+        tree = result
+
+    matches = []
+
+    def walk(node):
+        if not isinstance(node, dict):
+            return
+        node_text = node.get("text", "") or node.get("contentDescription", "") or ""
+        node_class = node.get("className", "") or ""
+        is_clickable = node.get("clickable", False)
+        bounds = node.get("bounds", None)
+
+        text_match = (not text) or (text.lower() in node_text.lower())
+        class_match = (not class_name) or (class_name.lower() in node_class.lower())
+        click_match = (not clickable_only) or is_clickable
+
+        if text_match and class_match and click_match and bounds:
+            matches.append({
+                "text": node_text,
+                "class": node_class,
+                "clickable": is_clickable,
+                "bounds": bounds,
+                "center_x": (bounds["left"] + bounds["right"]) // 2,
+                "center_y": (bounds["top"] + bounds["bottom"]) // 2,
+            })
+
+        for child in node.get("children", []):
+            walk(child)
+
+    if isinstance(tree, list):
+        for n in tree:
+            walk(n)
+    else:
+        walk(tree)
+
+    if not matches:
+        return "未找到匹配元素"
+    return json.dumps(matches[:20], ensure_ascii=False)
+
+
+@mcp.tool()
+async def phone_click_element(text="", class_name="", index=0):
+    """
+    在无障碍树中找到元素并点击其中心坐标。
+    text: 按文字内容匹配
+    class_name: 按类名匹配
+    index: 有多个匹配时选第几个（从0开始）
+    """
+    resp = await send_command("getState", {})
+    result = resp.get("result", "")
+    if isinstance(result, str):
+        try:
+            tree = json.loads(result)
+        except Exception:
+            return "无法解析无障碍树"
+    else:
+        tree = result
+
+    matches = []
+
+    def walk(node):
+        if not isinstance(node, dict):
+            return
+        node_text = node.get("text", "") or node.get("contentDescription", "") or ""
+        node_class = node.get("className", "") or ""
+        bounds = node.get("bounds", None)
+
+        text_match = (not text) or (text.lower() in node_text.lower())
+        class_match = (not class_name) or (class_name.lower() in node_class.lower())
+
+        if text_match and class_match and bounds:
+            matches.append({
+                "text": node_text,
+                "bounds": bounds,
+                "center_x": (bounds["left"] + bounds["right"]) // 2,
+                "center_y": (bounds["top"] + bounds["bottom"]) // 2,
+            })
+
+        for child in node.get("children", []):
+            walk(child)
+
+    if isinstance(tree, list):
+        for n in tree:
+            walk(n)
+    else:
+        walk(tree)
+
+    if not matches:
+        return "未找到元素: text=\"" + text + "\" class=\"" + class_name + "\""
+
+    if index >= len(matches):
+        return "index={} 超出范围，共找到 {} 个匹配".format(index, len(matches))
+
+    target = matches[index]
+    x = target["center_x"]
+    y = target["center_y"]
+    tap_resp = await send_command("tap", {"x": x, "y": y})
+    return "已点击 \"{}\" 坐标({},{}) 状态:{}".format(
+        target["text"], x, y, tap_resp.get("status", "unknown")
+    )
+
+
+@mcp.tool()
+async def phone_click_element_by_index(overlay_index):
+    """
+    Portal App 的叠加层会给每个可交互元素编号（数字标签）。
+    直接传入叠加层上显示的数字来点击对应元素。
+    overlay_index: 屏幕上叠加层显示的数字
+    """
+    resp = await send_command("getState", {})
+    result = resp.get("result", "")
+    if isinstance(result, str):
+        try:
+            tree = json.loads(result)
+        except Exception:
+            return "无法解析无障碍树"
+    else:
+        tree = result
+
+    # Portal 的 a11y_tree 通常带 index 字段
+    matches = []
+
+    def walk(node):
+        if not isinstance(node, dict):
+            return
+        if node.get("index") == overlay_index or node.get("overlayIndex") == overlay_index:
+            matches.append(node)
+        for child in node.get("children", []):
+            walk(child)
+
+    if isinstance(tree, list):
+        for n in tree:
+            walk(n)
+    else:
+        walk(tree)
+
+    if not matches:
+        return "未找到叠加层编号 {} 的元素".format(overlay_index)
+
+    node = matches[0]
+    bounds = node.get("bounds", {})
+    x = (bounds.get("left", 0) + bounds.get("right", 0)) // 2
+    y = (bounds.get("top", 0) + bounds.get("bottom", 0)) // 2
+    tap_resp = await send_command("tap", {"x": x, "y": y})
+    return "已点击编号{} \"{}\" 坐标({},{}) 状态:{}".format(
+        overlay_index, node.get("text", ""), x, y, tap_resp.get("status", "unknown")
+    )
+
 
 # ─────────────────────────── MCP SSE via raw ASGI middleware ───
 #
