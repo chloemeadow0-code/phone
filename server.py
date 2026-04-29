@@ -364,4 +364,4 @@ async def phone_keep_awake(enabled):
 
 # ─────────────────────────── mount MCP ─────────────────────────
 
-app.mount("/mcp/", mcp.streamable_http_app())
+app.mount("/mcp", mcp.sse_app())
