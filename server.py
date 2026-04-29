@@ -1,18 +1,21 @@
 """
 Mobilerun Portal Bridge Server
 - WebSocket endpoint for Android phone (reverse connection)
-- MCP tools via FastMCP mounted at /mcp/sse
+- MCP tools via FastMCP, SSE at /mcp/sse
 - HTTP control endpoints
 - Vision analysis via Doubao (volcengine ark)
+- Screenshot compression via Pillow
 - Deploy on Zeabur, port 8080
 """
 
 import asyncio
 import base64
+import io
 import json
 import uuid
 import logging
 
+from PIL import Image
 from volcenginesdkarkruntime import AsyncArk
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from mcp.server.fastmcp import FastMCP
@@ -85,6 +88,25 @@ async def send_command(method, params=None, timeout=10.0):
         raise TimeoutError("Command '{}' timed out after {}s".format(method, timeout))
     finally:
         pending.pop(cid, None)
+
+
+def compress_screenshot(b64, max_width=720, quality=60):
+    """Resize and compress a base64 PNG to a smaller base64 JPEG."""
+    try:
+        img_bytes = base64.b64decode(b64)
+        img = Image.open(io.BytesIO(img_bytes))
+
+        if img.width > max_width:
+            ratio = max_width / img.width
+            new_size = (max_width, int(img.height * ratio))
+            img = img.resize(new_size, Image.LANCZOS)
+
+        buf = io.BytesIO()
+        img.convert("RGB").save(buf, format="JPEG", quality=quality, optimize=True)
+        return base64.b64encode(buf.getvalue()).decode()
+    except Exception as e:
+        log.warning("Image compression failed: %s, returning original", e)
+        return b64
 
 
 # ─────────────────────────── WebSocket reader ──────────────────
@@ -174,10 +196,17 @@ async def http_cmd(method: str, params: str = "{}"):
 # ─────────────────────────── MCP tools ─────────────────────────
 
 @mcp.tool()
-async def phone_screenshot():
-    """Take a screenshot. Returns base64-encoded PNG string."""
+async def phone_screenshot(max_width=720, quality=60):
+    """
+    Take a screenshot. Returns compressed base64 JPEG string.
+    max_width: resize width in pixels (default 720).
+    quality: JPEG quality 1-95 (default 60).
+    """
     resp = await send_command("screenshot", {}, timeout=15.0)
-    return resp.get("result", "")
+    b64 = resp.get("result", "")
+    if not b64:
+        return ""
+    return compress_screenshot(b64, max_width=max_width, quality=quality)
 
 
 @mcp.tool()
@@ -198,14 +227,9 @@ async def phone_analyze_screen(question="描述当前屏幕上显示的内容，
                 "content": [
                     {
                         "type": "image_url",
-                        "image_url": {
-                            "url": "data:image/png;base64," + screenshot_b64
-                        },
+                        "image_url": {"url": "data:image/jpeg;base64," + screenshot_b64},
                     },
-                    {
-                        "type": "text",
-                        "text": question,
-                    },
+                    {"type": "text", "text": question},
                 ],
             }
         ],
@@ -237,14 +261,9 @@ async def phone_tap_by_description(target):
                 "content": [
                     {
                         "type": "image_url",
-                        "image_url": {
-                            "url": "data:image/png;base64," + screenshot_b64
-                        },
+                        "image_url": {"url": "data:image/jpeg;base64," + screenshot_b64},
                     },
-                    {
-                        "type": "text",
-                        "text": prompt,
-                    },
+                    {"type": "text", "text": prompt},
                 ],
             }
         ],
@@ -330,23 +349,50 @@ async def phone_stop_app(package):
 
 
 @mcp.tool()
-async def phone_get_state():
-    """Retrieve the current accessibility tree (UI hierarchy) of the screen."""
+async def phone_get_state(max_chars=6000):
+    """
+    Retrieve the current accessibility tree (UI hierarchy) of the screen.
+    max_chars: truncate result to avoid context overflow (default 6000).
+    """
     resp = await send_command("getState", {})
     result = resp.get("result", "")
     if isinstance(result, (dict, list)):
-        return json.dumps(result, ensure_ascii=False)
-    return str(result)
+        text = json.dumps(result, ensure_ascii=False)
+    else:
+        text = str(result)
+
+    if len(text) > max_chars:
+        text = text[:max_chars] + "\n...[truncated, {} chars total]".format(len(text))
+    return text
 
 
 @mcp.tool()
-async def phone_get_packages():
-    """Get the list of all installed app packages on the device."""
+async def phone_get_packages(filter_keyword=""):
+    """
+    Get installed app packages.
+    filter_keyword: optional keyword to filter (e.g. 'com.tencent').
+    Returns at most 100 results to avoid context overflow.
+    """
     resp = await send_command("getPackages", {})
     result = resp.get("result", [])
-    if isinstance(result, (dict, list)):
-        return json.dumps(result, ensure_ascii=False)
-    return str(result)
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except Exception:
+            return result
+
+    if not isinstance(result, list):
+        return str(result)
+
+    if filter_keyword:
+        result = [p for p in result if filter_keyword.lower() in str(p).lower()]
+
+    total = len(result)
+    truncated = result[:100]
+    out = json.dumps(truncated, ensure_ascii=False)
+    if total > 100:
+        out += "\n...[showing 100/{} packages, use filter_keyword to narrow down]".format(total)
+    return out
 
 
 @mcp.tool()
@@ -356,26 +402,46 @@ async def phone_keep_awake(enabled):
     return resp.get("status", "unknown")
 
 
-# ─────────────────────────── MCP SSE transport ─────────────────
-# Bypass built-in host validation by using the low-level SSE transport directly
+# ─────────────────────────── MCP SSE via raw ASGI middleware ───
+#
+# Wraps the entire FastAPI app so SSE requests bypass Starlette's
+# error/exception middleware completely, which would otherwise
+# conflict with SSE's long-lived streaming responses.
 
 sse_transport = SseServerTransport("/mcp/messages/")
 
 
-@app.get("/mcp/sse")
-async def mcp_sse(request: Request):
-    async with sse_transport.connect_sse(
-        request.scope, request.receive, request._send
-    ) as (read_stream, write_stream):
-        await mcp._mcp_server.run(
-            read_stream,
-            write_stream,
-            mcp._mcp_server.create_initialization_options(),
-        )
+class MCPMiddleware:
+    """Raw ASGI middleware that intercepts /mcp/* before FastAPI."""
+
+    def __init__(self, asgi_app):
+        self.asgi_app = asgi_app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") == "http":
+            path = scope.get("path", "")
+            method = scope.get("method", "GET")
+
+            if path == "/mcp/sse" and method == "GET":
+                try:
+                    async with sse_transport.connect_sse(scope, receive, send) as (r, w):
+                        await mcp._mcp_server.run(
+                            r, w,
+                            mcp._mcp_server.create_initialization_options(),
+                        )
+                except Exception as exc:
+                    log.error("SSE handler error: %s", exc)
+                return
+
+            if path in ("/mcp/messages/", "/mcp/messages") and method == "POST":
+                try:
+                    await sse_transport.handle_post_message(scope, receive, send)
+                except Exception as exc:
+                    log.error("Messages handler error: %s", exc)
+                return
+
+        await self.asgi_app(scope, receive, send)
 
 
-@app.post("/mcp/messages/")
-async def mcp_messages(request: Request):
-    await sse_transport.handle_post_message(
-        request.scope, request.receive, request._send
-    )
+# Wrap FastAPI app — must be the last line
+app = MCPMiddleware(app)
