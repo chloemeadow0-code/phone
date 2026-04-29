@@ -1,4 +1,5 @@
 fastapi
-uvicorn
+uvicorn[standard]
 websockets
-mcp
+mcp[cli]
+anthropic
