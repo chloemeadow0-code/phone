@@ -1,44 +1,58 @@
 from fastapi import FastAPI, WebSocket
-from fastapi.responses import JSONResponse
 import json, uuid, asyncio
 
 app = FastAPI()
 phone_ws = None
+pending = {}
 
-@app.get("/status")
-async def status():
-    return {"phone_connected": phone_ws is not None}
+async def reader(ws):
+    global phone_ws
+    try:
+        while True:
+            data = await ws.receive()
+            if "text" in data:
+                msg = json.loads(data["text"])
+                mid = msg.get("id")
+                if mid and mid in pending:
+                    pending[mid].set_result(msg)
+            elif "bytes" in data:
+                b = data["bytes"]
+                if len(b) > 36:
+                    rid = b[:36].decode()
+                    if rid in pending:
+                        import base64
+                        pending[rid].set_result({"id": rid, "result": base64.b64encode(b[36:]).decode()})
+    except:
+        phone_ws = None
 
 @app.get("/ping")
 async def ping():
     return {"status": "ok"}
 
+@app.get("/status")
+async def status():
+    return {"phone_connected": phone_ws is not None}
+
 @app.websocket("/ws")
-async def phone_endpoint(ws: WebSocket):
+async def ws_endpoint(ws: WebSocket):
     global phone_ws
     await ws.accept()
     phone_ws = ws
     print("Phone connected!")
-    try:
-        while True:
-            data = await ws.receive()
-            if "text" in data:
-                print(f"Phone: {data['text']}")
-            elif "bytes" in data:
-                print(f"Phone binary: {len(data['bytes'])} bytes")
-    except:
-        phone_ws = None
-        print("Phone disconnected")
+    await reader(ws)
 
 @app.post("/cmd")
-async def send_cmd(method: str, params: str = "{}"):
+async def cmd(method: str, params: str = "{}"):
     global phone_ws
     if not phone_ws:
         return {"error": "no phone"}
-    cmd = {"id": str(uuid.uuid4()), "method": method, "params": json.loads(params)}
-    await phone_ws.send_text(json.dumps(cmd))
+    cid = str(uuid.uuid4())
+    fut = asyncio.get_event_loop().create_future()
+    pending[cid] = fut
+    await phone_ws.send_text(json.dumps({"id": cid, "method": method, "params": json.loads(params)}))
     try:
-        resp = await asyncio.wait_for(phone_ws.receive_text(), timeout=10)
-        return json.loads(resp)
-    except:
+        return await asyncio.wait_for(fut, timeout=10)
+    except asyncio.TimeoutError:
         return {"error": "timeout"}
+    finally:
+        pending.pop(cid, None)
