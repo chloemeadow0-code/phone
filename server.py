@@ -3,7 +3,7 @@ Mobilerun Portal Bridge Server
 - WebSocket endpoint for Android phone (reverse connection)
 - MCP tools via FastMCP mounted at /mcp
 - HTTP control endpoints
-- Vision analysis via Anthropic API (for non-vision MCP clients)
+- Vision analysis via Doubao (volcengine ark)
 - Deploy on Zeabur, port 8080
 """
 
@@ -15,7 +15,7 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Any
 
-import anthropic
+from volcenginesdkarkruntime import AsyncArk
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from mcp.server.fastmcp import FastMCP
 
@@ -31,10 +31,10 @@ log = logging.getLogger(__name__)
 
 phone_ws: WebSocket | None = None
 pending: dict[str, asyncio.Future] = {}
-_lock = asyncio.Lock()          # protect phone_ws writes
+_lock = asyncio.Lock()
 
-# Anthropic client for vision analysis (reads ANTHROPIC_API_KEY from env)
-_anthropic_client = anthropic.AsyncAnthropic()
+# 豆包视觉客户端（自动读取 ARK_API_KEY 环境变量）
+_vision_client = AsyncArk()
 
 
 # ─────────────────────────── core helpers ──────────────────────
@@ -171,7 +171,7 @@ async def ws_endpoint(ws: WebSocket):
     await ws.accept()
     phone_ws = ws
     log.info("Phone connected: %s", ws.client)
-    await reader(ws)          # blocks until disconnect
+    await reader(ws)
 
 
 @app.post("/cmd")
@@ -194,6 +194,8 @@ mcp = FastMCP(
 )
 
 
+# ── 截图 ──────────────────────────────────────────────────────
+
 @mcp.tool()
 async def phone_screenshot() -> str:
     """
@@ -204,84 +206,69 @@ async def phone_screenshot() -> str:
     Both cases are handled transparently.
     """
     resp = await send_command("screenshot", {}, timeout=15.0)
-    result = resp.get("result", "")
-    # result is already base64 whether it came from binary or JSON path
-    return result
+    return resp.get("result", "")
 
+
+# ── 视觉分析 ──────────────────────────────────────────────────
 
 @mcp.tool()
 async def phone_analyze_screen(
     question: str = "描述当前屏幕上显示的内容，包括所有可见的文字、按钮和界面元素",
 ) -> str:
     """
-    截图并用视觉模型（claude-opus-4-5）分析屏幕内容，返回文字描述。
-    当控制端模型不支持图片时，用此工具代替 phone_screenshot()。
-    question: 你想问关于当前屏幕的具体问题，默认是描述全部内容。
-    示例: "登录按钮在哪里？", "输入框里现在有什么文字？", "当前页面是什么App？"
+    截图并用豆包视觉模型分析屏幕内容，返回文字描述。
+    question: 你想问关于当前屏幕的具体问题。
+    示例: "登录按钮在哪里？", "输入框里现在有什么文字？", "当前是什么App？"
     """
-    # 1. 截图
     screenshot_b64 = await phone_screenshot()
     if not screenshot_b64:
         return "截图失败，无法分析屏幕"
 
-    # 2. 调用视觉模型分析
-    resp = await _anthropic_client.messages.create(
-        model="claude-opus-4-5",
-        max_tokens=1024,
+    resp = await _vision_client.chat.completions.create(
+        model="ep-20260421160843-l48q6",  # 替换为你的推理接入点 ID，格式: ep-xxxxxxxx
         messages=[
             {
                 "role": "user",
                 "content": [
                     {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": "image/png",
-                            "data": screenshot_b64,
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{screenshot_b64}"
                         },
                     },
-                    {
-                        "type": "text",
-                        "text": question,
-                    },
+                    {"type": "text", "text": question},
                 ],
             }
         ],
     )
-    return resp.content[0].text
+    return resp.choices[0].message.content
 
 
 @mcp.tool()
 async def phone_tap_by_description(target: str) -> str:
     """
-    截图后由视觉模型识别目标元素坐标并自动点击。
-    适合不支持视觉的控制端模型，只需描述要点击的内容即可。
+    截图后由豆包视觉模型识别目标元素坐标并自动点击。
     target: 要点击的元素描述，例如 "登录按钮"、"搜索框"、"返回箭头"
     """
-    # 1. 截图
     screenshot_b64 = await phone_screenshot()
     if not screenshot_b64:
         return "截图失败，无法定位元素"
 
-    # 2. 让视觉模型返回坐标 JSON
     prompt = (
         f"请在图片中找到"{target}"，返回其中心点坐标。"
         f"只返回 JSON，格式: {{\"x\": 数字, \"y\": 数字, \"found\": true/false, \"reason\": \"说明\"}}"
         f"坐标单位是像素，原点在左上角。如果找不到，found 返回 false。"
     )
-    vision_resp = await _anthropic_client.messages.create(
-        model="claude-opus-4-5",
-        max_tokens=128,
+    resp = await _vision_client.chat.completions.create(
+        model="doubao-vision-pro-32k",  # 替换为你的推理接入点 ID，格式: ep-xxxxxxxx
         messages=[
             {
                 "role": "user",
                 "content": [
                     {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": "image/png",
-                            "data": screenshot_b64,
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{screenshot_b64}"
                         },
                     },
                     {"type": "text", "text": prompt},
@@ -290,26 +277,22 @@ async def phone_tap_by_description(target: str) -> str:
         ],
     )
 
-    raw = vision_resp.content[0].text.strip()
-
-    # 3. 解析坐标
+    raw = resp.choices[0].message.content.strip()
     try:
-        # 去掉可能的 markdown 代码块
         clean = raw.replace("```json", "").replace("```", "").strip()
         coords = json.loads(clean)
     except json.JSONDecodeError:
         return f"视觉模型返回格式无法解析: {raw}"
 
     if not coords.get("found", False):
-        return f"未找到目标元素 "{target}"：{coords.get('reason', '未知原因')}"
+        return f"未找到目标元素"{target}"：{coords.get('reason', '未知原因')}"
 
     x, y = int(coords["x"]), int(coords["y"])
-
-    # 4. 点击
     tap_resp = await send_command("tap", {"x": x, "y": y})
-    status = tap_resp.get("status", "unknown")
-    return f"已点击 "{target}" 坐标 ({x}, {y})，状态: {status}"
+    return f"已点击"{target}"坐标 ({x}, {y})，状态: {tap_resp.get('status', 'unknown')}"
 
+
+# ── 触控 ──────────────────────────────────────────────────────
 
 @mcp.tool()
 async def phone_tap(x: int, y: int) -> str:
@@ -342,6 +325,8 @@ async def phone_swipe(
     )
     return resp.get("status", "unknown")
 
+
+# ── 输入 ──────────────────────────────────────────────────────
 
 @mcp.tool()
 async def phone_input_text(text: str) -> str:
@@ -378,6 +363,8 @@ async def phone_press_home() -> str:
     return resp.get("status", "unknown")
 
 
+# ── App 管理 ──────────────────────────────────────────────────
+
 @mcp.tool()
 async def phone_launch_app(package: str) -> str:
     """
@@ -397,6 +384,8 @@ async def phone_stop_app(package: str) -> str:
     resp = await send_command("stopApp", {"package": package})
     return resp.get("status", "unknown")
 
+
+# ── 系统信息 ──────────────────────────────────────────────────
 
 @mcp.tool()
 async def phone_get_state() -> str:
@@ -435,6 +424,5 @@ async def phone_keep_awake(enabled: bool) -> str:
 
 
 # ─────────────────────────── mount MCP ─────────────────────────
-# streamable_http_app mounts the MCP server as an ASGI sub-app at /mcp
 
 app.mount("/mcp", mcp.streamable_http_app())
