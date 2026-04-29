@@ -196,7 +196,7 @@ async def http_cmd(method: str, params: str = "{}"):
 # ─────────────────────────── MCP tools ─────────────────────────
 
 @mcp.tool()
-async def phone_screenshot(max_width=720, quality=60):
+async def phone_screenshot(max_width: int = 720, quality: int = 60) -> str:
     """
     Take a screenshot. Returns compressed base64 JPEG string.
     max_width: resize width in pixels (default 720).
@@ -210,7 +210,7 @@ async def phone_screenshot(max_width=720, quality=60):
 
 
 @mcp.tool()
-async def phone_analyze_screen(question="描述当前屏幕上显示的内容，包括所有可见的文字、按钮和界面元素"):
+async def phone_analyze_screen(question: str = "描述当前屏幕上显示的内容，包括所有可见的文字、按钮和界面元素") -> str:
     """
     截图并用豆包视觉模型分析屏幕内容，返回文字描述。
     question: 你想问关于当前屏幕的具体问题。
@@ -238,7 +238,7 @@ async def phone_analyze_screen(question="描述当前屏幕上显示的内容，
 
 
 @mcp.tool()
-async def phone_tap_by_description(target):
+async def phone_tap_by_description(target: str) -> str:
     """
     截图后由豆包视觉模型识别目标元素坐标并自动点击。
     target: 要点击的元素描述，例如 登录按钮、搜索框、返回箭头
@@ -286,14 +286,14 @@ async def phone_tap_by_description(target):
 
 
 @mcp.tool()
-async def phone_tap(x, y):
+async def phone_tap(x: int, y: int) -> str:
     """Tap the screen at coordinates (x, y)."""
     resp = await send_command("tap", {"x": x, "y": y})
     return resp.get("status", "unknown")
 
 
 @mcp.tool()
-async def phone_swipe(start_x, start_y, end_x, end_y, duration=300):
+async def phone_swipe(start_x: int, start_y: int, end_x: int, end_y: int, duration: int = 300) -> str:
     """Swipe from (start_x, start_y) to (end_x, end_y). duration in milliseconds."""
     resp = await send_command("swipe", {
         "startX": start_x,
@@ -306,7 +306,7 @@ async def phone_swipe(start_x, start_y, end_x, end_y, duration=300):
 
 
 @mcp.tool()
-async def phone_input_text(text):
+async def phone_input_text(text: str) -> str:
     """Type text into the currently focused input field."""
     encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
     resp = await send_command("inputText", {"text": encoded, "base64": True})
@@ -314,42 +314,42 @@ async def phone_input_text(text):
 
 
 @mcp.tool()
-async def phone_press_key(key_code):
+async def phone_press_key(key_code: int) -> str:
     """Press an Android key by its key code. Common: 3=HOME 4=BACK 66=ENTER."""
     resp = await send_command("pressKey", {"keyCode": key_code})
     return resp.get("status", "unknown")
 
 
 @mcp.tool()
-async def phone_press_back():
+async def phone_press_back() -> str:
     """Press the Back button (global action 1)."""
     resp = await send_command("globalAction", {"action": 1})
     return resp.get("status", "unknown")
 
 
 @mcp.tool()
-async def phone_press_home():
+async def phone_press_home() -> str:
     """Press the Home button (global action 2)."""
     resp = await send_command("globalAction", {"action": 2})
     return resp.get("status", "unknown")
 
 
 @mcp.tool()
-async def phone_launch_app(package):
+async def phone_launch_app(package: str) -> str:
     """Launch an Android app by package name. Example: com.android.settings"""
     resp = await send_command("launchApp", {"package": package})
     return resp.get("status", "unknown")
 
 
 @mcp.tool()
-async def phone_stop_app(package):
+async def phone_stop_app(package: str) -> str:
     """Force-stop an Android app by package name."""
     resp = await send_command("stopApp", {"package": package})
     return resp.get("status", "unknown")
 
 
 @mcp.tool()
-async def phone_get_state(max_chars=6000):
+async def phone_get_state(max_chars: int = 6000) -> str:
     """
     Retrieve the current accessibility tree (UI hierarchy) of the screen.
     max_chars: truncate result to avoid context overflow (default 6000).
@@ -367,7 +367,7 @@ async def phone_get_state(max_chars=6000):
 
 
 @mcp.tool()
-async def phone_get_packages(filter_keyword=""):
+async def phone_get_packages(filter_keyword: str = "") -> str:
     """
     Get installed app packages.
     filter_keyword: optional keyword to filter (e.g. 'com.tencent').
@@ -396,13 +396,14 @@ async def phone_get_packages(filter_keyword=""):
 
 
 @mcp.tool()
-async def phone_keep_awake(enabled):
+async def phone_keep_awake(enabled: bool) -> str:
     """Enable or disable keep-screen-awake. enabled=True prevents screen off."""
     resp = await send_command("keepAwake", {"enabled": enabled})
     return resp.get("status", "unknown")
 
+
 @mcp.tool()
-async def phone_find_elements(text="", class_name="", clickable_only=False):
+async def phone_find_elements(text: str = "", class_name: str = "", clickable_only: bool = False) -> str:
     """
     从无障碍树中搜索元素，返回匹配的节点列表（含坐标）。
     text: 按文字内容匹配（模糊）
@@ -458,7 +459,7 @@ async def phone_find_elements(text="", class_name="", clickable_only=False):
 
 
 @mcp.tool()
-async def phone_click_element(text="", class_name="", index=0):
+async def phone_click_element(text: str = "", class_name: str = "", index: int = 0) -> str:
     """
     在无障碍树中找到元素并点击其中心坐标。
     text: 按文字内容匹配
@@ -520,9 +521,9 @@ async def phone_click_element(text="", class_name="", index=0):
 
 
 @mcp.tool()
-async def phone_click_element_by_index(overlay_index):
+async def phone_click_element_by_index(overlay_index: int) -> str:
     """
-    Portal App 的叠加层会给每个可交互元素编号（数字标签）。
+    Portal App 叠加层会给每个可交互元素编号（屏幕上显示的数字标签）。
     直接传入叠加层上显示的数字来点击对应元素。
     overlay_index: 屏幕上叠加层显示的数字
     """
@@ -536,7 +537,6 @@ async def phone_click_element_by_index(overlay_index):
     else:
         tree = result
 
-    # Portal 的 a11y_tree 通常带 index 字段
     matches = []
 
     def walk(node):
@@ -567,10 +567,6 @@ async def phone_click_element_by_index(overlay_index):
 
 
 # ─────────────────────────── MCP SSE via raw ASGI middleware ───
-#
-# Wraps the entire FastAPI app so SSE requests bypass Starlette's
-# error/exception middleware completely, which would otherwise
-# conflict with SSE's long-lived streaming responses.
 
 sse_transport = SseServerTransport("/mcp/messages/")
 
