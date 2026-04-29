@@ -3,3 +3,4 @@ uvicorn[standard]
 websockets
 mcp[cli]
 volcengine-python-sdk[ark]
+Pillow
