@@ -7,13 +7,15 @@ Mobilerun Portal Bridge Server
 - Deploy on Zeabur, port 8080
 """
 
+from __future__ import annotations
+
 import asyncio
 import base64
 import json
 import uuid
 import logging
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Dict, Optional
 
 from volcenginesdkarkruntime import AsyncArk
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -29,8 +31,8 @@ log = logging.getLogger(__name__)
 
 # ─────────────────────────── global state ──────────────────────
 
-phone_ws: WebSocket | None = None
-pending: dict[str, asyncio.Future] = {}
+phone_ws: Optional[WebSocket] = None
+pending: Dict[str, asyncio.Future] = {}
 _lock = asyncio.Lock()
 
 # 豆包视觉客户端（自动读取 ARK_API_KEY 环境变量）
@@ -52,9 +54,9 @@ async def _cleanup_phone():
 
 async def send_command(
     method: str,
-    params: dict[str, Any] | None = None,
+    params: Optional[Dict[str, Any]] = None,
     timeout: float = 10.0,
-) -> dict[str, Any]:
+) -> Dict[str, Any]:
     """
     Send a JSON-RPC command to the phone and await the response.
     Thread-safe via asyncio; reader() dispatches replies into pending.
