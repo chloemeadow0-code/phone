@@ -363,5 +363,23 @@ async def phone_keep_awake(enabled):
 
 
 # ─────────────────────────── mount MCP ─────────────────────────
+from mcp.server.sse import SseServerTransport
 
-app.mount("/mcp", mcp.sse_app())
+sse_transport = SseServerTransport("/mcp/messages")
+
+@app.get("/mcp/sse")
+async def mcp_sse(request):
+    async with sse_transport.connect_sse(
+        request.scope, request.receive, request._send
+    ) as (read_stream, write_stream):
+        await mcp._mcp_server.run(
+            read_stream,
+            write_stream,
+            mcp._mcp_server.create_initialization_options(),
+        )
+
+@app.post("/mcp/messages")
+async def mcp_messages(request):
+    await sse_transport.handle_post_message(
+        request.scope, request.receive, request._send
+    )
