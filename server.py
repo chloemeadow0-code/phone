@@ -1,7 +1,7 @@
 """
 Mobilerun Portal Bridge Server
 - WebSocket endpoint for Android phone (reverse connection)
-- MCP tools via FastMCP mounted at /mcp
+- MCP tools via FastMCP mounted at /mcp/sse
 - HTTP control endpoints
 - Vision analysis via Doubao (volcengine ark)
 - Deploy on Zeabur, port 8080
@@ -14,8 +14,9 @@ import uuid
 import logging
 
 from volcenginesdkarkruntime import AsyncArk
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from mcp.server.fastmcp import FastMCP
+from mcp.server.sse import SseServerTransport
 
 # ─────────────────────────── logging ───────────────────────────
 
@@ -151,7 +152,7 @@ async def status():
 
 
 @app.websocket("/ws")
-async def ws_endpoint(ws):
+async def ws_endpoint(ws: WebSocket):
     global phone_ws
     await ws.accept()
     phone_ws = ws
@@ -160,7 +161,7 @@ async def ws_endpoint(ws):
 
 
 @app.post("/cmd")
-async def http_cmd(method, params="{}"):
+async def http_cmd(method: str, params: str = "{}"):
     try:
         result = await send_command(method, json.loads(params))
         return result
@@ -184,7 +185,6 @@ async def phone_analyze_screen(question="描述当前屏幕上显示的内容，
     """
     截图并用豆包视觉模型分析屏幕内容，返回文字描述。
     question: 你想问关于当前屏幕的具体问题。
-    示例: 登录按钮在哪里？输入框里现在有什么文字？当前是什么App？
     """
     screenshot_b64 = await phone_screenshot()
     if not screenshot_b64:
@@ -230,7 +230,7 @@ async def phone_tap_by_description(target):
     )
 
     resp = await _vision_client.chat.completions.create(
-        model="doubao-vision-pro-32k",
+        model="ep-20260421160843-l48q6",
         messages=[
             {
                 "role": "user",
@@ -275,10 +275,7 @@ async def phone_tap(x, y):
 
 @mcp.tool()
 async def phone_swipe(start_x, start_y, end_x, end_y, duration=300):
-    """
-    Swipe from (start_x, start_y) to (end_x, end_y).
-    duration is in milliseconds (default 300ms).
-    """
+    """Swipe from (start_x, start_y) to (end_x, end_y). duration in milliseconds."""
     resp = await send_command("swipe", {
         "startX": start_x,
         "startY": start_y,
@@ -299,10 +296,7 @@ async def phone_input_text(text):
 
 @mcp.tool()
 async def phone_press_key(key_code):
-    """
-    Press an Android key by its key code.
-    Common codes: 3=HOME, 4=BACK, 24=VOL_UP, 25=VOL_DOWN, 26=POWER, 66=ENTER.
-    """
+    """Press an Android key by its key code. Common: 3=HOME 4=BACK 66=ENTER."""
     resp = await send_command("pressKey", {"keyCode": key_code})
     return resp.get("status", "unknown")
 
@@ -323,14 +317,14 @@ async def phone_press_home():
 
 @mcp.tool()
 async def phone_launch_app(package):
-    """Launch an Android app by its package name. Example: com.android.settings"""
+    """Launch an Android app by package name. Example: com.android.settings"""
     resp = await send_command("launchApp", {"package": package})
     return resp.get("status", "unknown")
 
 
 @mcp.tool()
 async def phone_stop_app(package):
-    """Force-stop an Android app by its package name."""
+    """Force-stop an Android app by package name."""
     resp = await send_command("stopApp", {"package": package})
     return resp.get("status", "unknown")
 
@@ -357,18 +351,19 @@ async def phone_get_packages():
 
 @mcp.tool()
 async def phone_keep_awake(enabled):
-    """Enable or disable keep-screen-awake mode. enabled=True prevents screen off."""
+    """Enable or disable keep-screen-awake. enabled=True prevents screen off."""
     resp = await send_command("keepAwake", {"enabled": enabled})
     return resp.get("status", "unknown")
 
 
-# ─────────────────────────── mount MCP ─────────────────────────
-from mcp.server.sse import SseServerTransport
+# ─────────────────────────── MCP SSE transport ─────────────────
+# Bypass built-in host validation by using the low-level SSE transport directly
 
-sse_transport = SseServerTransport("/mcp/messages")
+sse_transport = SseServerTransport("/mcp/messages/")
+
 
 @app.get("/mcp/sse")
-async def mcp_sse(request):
+async def mcp_sse(request: Request):
     async with sse_transport.connect_sse(
         request.scope, request.receive, request._send
     ) as (read_stream, write_stream):
@@ -378,8 +373,9 @@ async def mcp_sse(request):
             mcp._mcp_server.create_initialization_options(),
         )
 
-@app.post("/mcp/messages")
-async def mcp_messages(request):
+
+@app.post("/mcp/messages/")
+async def mcp_messages(request: Request):
     await sse_transport.handle_post_message(
         request.scope, request.receive, request._send
     )
