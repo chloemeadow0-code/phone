@@ -2,4 +2,4 @@ fastapi
 uvicorn[standard]
 websockets
 mcp[cli]
-anthropic
+volcengine-python-sdk[ark]
