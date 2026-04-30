@@ -107,11 +107,17 @@ def compress_screenshot(b64, max_width=720, quality=60):
         return b64
 
 
+async def _screenshot_internal():
+    """内部截图函数，不暴露为MCP工具。"""
+    resp = await send_command("screenshot", {}, timeout=15.0)
+    b64 = resp.get("result", "")
+    if not b64:
+        return ""
+    return compress_screenshot(b64)
+
+
 def parse_nodes(tree, text_filter="", class_filter="", clickable_only=False):
-    """
-    递归遍历 Portal 返回的无障碍树，提取节点列表。
-    Portal 字段名: boundsInScreen, isClickable, isEditable 等。
-    """
+    """递归遍历 Portal 无障碍树，提取节点列表。"""
     matches = []
 
     def walk(node):
@@ -160,6 +166,11 @@ async def reader(ws):
     try:
         while True:
             data = await ws.receive()
+
+            # 收到断线帧，主动退出
+            if data.get("type") == "websocket.disconnect":
+                log.info("Phone sent disconnect frame.")
+                break
 
             if "text" in data:
                 try:
@@ -240,26 +251,13 @@ async def http_cmd(method: str, params: str = "{}"):
 # ─────────────────────────── MCP tools ─────────────────────────
 
 @mcp.tool()
-async def phone_screenshot(max_width: int = 720, quality: int = 60) -> str:
-    """
-    Take a screenshot. Returns compressed base64 JPEG string.
-    max_width: resize width in pixels (default 720).
-    quality: JPEG quality 1-95 (default 60).
-    """
-    resp = await send_command("screenshot", {}, timeout=15.0)
-    b64 = resp.get("result", "")
-    if not b64:
-        return ""
-    return compress_screenshot(b64, max_width=max_width, quality=quality)
-
-
-@mcp.tool()
 async def phone_analyze_screen(question: str = "描述当前屏幕上显示的内容，包括所有可见的文字、按钮和界面元素") -> str:
     """
     截图并用豆包视觉模型分析屏幕内容，返回文字描述。
     question: 你想问关于当前屏幕的具体问题。
+    示例: 登录按钮在哪里？当前页面是什么？输入框有什么文字？
     """
-    screenshot_b64 = await phone_screenshot()
+    screenshot_b64 = await _screenshot_internal()
     if not screenshot_b64:
         return "截图失败，无法分析屏幕"
     resp = await _vision_client.chat.completions.create(
@@ -281,7 +279,7 @@ async def phone_tap_by_description(target: str) -> str:
     截图后由豆包视觉模型识别目标元素坐标并自动点击。
     target: 要点击的元素描述，例如 登录按钮、搜索框、返回箭头
     """
-    screenshot_b64 = await phone_screenshot()
+    screenshot_b64 = await _screenshot_internal()
     if not screenshot_b64:
         return "截图失败，无法定位元素"
 
@@ -346,22 +344,25 @@ async def phone_input_text(text: str) -> str:
 
 @mcp.tool()
 async def phone_press_key(key_code: int) -> str:
-    """Press an Android key by its key code. Common: 3=HOME 4=BACK 66=ENTER 67=BACKSPACE."""
+    """
+    Press an Android key by its key code.
+    Common: 3=HOME 4=BACK 66=ENTER 67=BACKSPACE 26=POWER 24=VOL_UP 25=VOL_DOWN
+    """
     resp = await send_command("pressKey", {"keyCode": key_code})
     return resp.get("status", "unknown")
 
 
 @mcp.tool()
 async def phone_press_back() -> str:
-    """Press the Back button (global action 1)."""
-    resp = await send_command("globalAction", {"action": 1})
+    """Press the Back button."""
+    resp = await send_command("pressKey", {"keyCode": 4})
     return resp.get("status", "unknown")
 
 
 @mcp.tool()
 async def phone_press_home() -> str:
-    """Press the Home button (global action 2)."""
-    resp = await send_command("globalAction", {"action": 2})
+    """Press the Home button."""
+    resp = await send_command("pressKey", {"keyCode": 3})
     return resp.get("status", "unknown")
 
 
@@ -384,7 +385,6 @@ async def phone_get_state(max_chars: int = 6000) -> str:
     """
     获取当前屏幕完整状态，包含无障碍树和手机状态（当前App、键盘是否可见等）。
     max_chars: 截断长度，避免上下文溢出（默认6000）。
-    Portal方法: state
     """
     resp = await send_command("state", {})
     result = resp.get("result", "")
@@ -418,7 +418,7 @@ async def phone_get_packages(filter_keyword: str = "") -> str:
     truncated = result[:100]
     out = json.dumps(truncated, ensure_ascii=False)
     if total > 100:
-        out += "\n...[showing 100/{} packages, use filter_keyword to narrow down]".format(total)
+        out += "\n...[showing 100/{} packages, use filter_keyword to narrow]".format(total)
     return out
 
 
