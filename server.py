@@ -6,6 +6,16 @@ Mobilerun Portal Bridge Server
 - Vision analysis via Doubao (volcengine ark)
 - Screenshot compression via Pillow
 - Deploy on Zeabur, port 8080
+
+Confirmed working Portal methods:
+  state           - get accessibility tree + phone state
+  screenshot      - take screenshot (binary or base64)
+  tap             - tap at coordinates
+  swipe           - swipe gesture
+  keyboard/key    - press key by key_code (3=HOME, 4=BACK, 66=ENTER, 67=BACKSPACE)
+  keyboard/input  - input text (base64_text + clear)
+  packages        - get installed app list
+  launchApp       - launch app by package name
 """
 
 import asyncio
@@ -335,49 +345,57 @@ async def phone_swipe(start_x: int, start_y: int, end_x: int, end_y: int, durati
 
 
 @mcp.tool()
-async def phone_input_text(text: str) -> str:
-    """Type text into the currently focused input field."""
+async def phone_input_text(text: str, clear: bool = True) -> str:
+    """
+    在当前焦点输入框中输入文字。
+    text: 要输入的文字
+    clear: 是否先清空输入框（默认True）
+    注意: 需要先点击输入框使其获得焦点。
+    """
     encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
-    resp = await send_command("inputText", {"text": encoded, "base64": True})
-    return resp.get("status", "unknown")
+    resp = await send_command("keyboard/input", {
+        "base64_text": encoded,
+        "clear": clear,
+    })
+    return resp.get("result", resp.get("status", "unknown"))
 
 
 @mcp.tool()
 async def phone_press_key(key_code: int) -> str:
     """
-    Press an Android key by its key code.
-    Common: 3=HOME 4=BACK 66=ENTER 67=BACKSPACE 26=POWER 24=VOL_UP 25=VOL_DOWN
+    按下指定键码的按键。
+    常用键码: 3=HOME 4=BACK 66=ENTER 67=BACKSPACE 62=SPACE 111=ESC
     """
-    resp = await send_command("pressKey", {"keyCode": key_code})
-    return resp.get("status", "unknown")
+    resp = await send_command("keyboard/key", {"key_code": key_code})
+    return resp.get("result", resp.get("status", "unknown"))
 
 
 @mcp.tool()
 async def phone_press_back() -> str:
-    """Press the Back button."""
-    resp = await send_command("pressKey", {"keyCode": 4})
-    return resp.get("status", "unknown")
+    """按返回键 (BACK, keyCode=4)。"""
+    resp = await send_command("keyboard/key", {"key_code": 4})
+    return resp.get("result", resp.get("status", "unknown"))
 
 
 @mcp.tool()
 async def phone_press_home() -> str:
-    """Press the Home button."""
-    resp = await send_command("pressKey", {"keyCode": 3})
-    return resp.get("status", "unknown")
+    """按Home键 (keyCode=3)。"""
+    resp = await send_command("keyboard/key", {"key_code": 3})
+    return resp.get("result", resp.get("status", "unknown"))
 
 
 @mcp.tool()
 async def phone_launch_app(package: str) -> str:
     """Launch an Android app by package name. Example: com.android.settings"""
     resp = await send_command("launchApp", {"package": package})
-    return resp.get("status", "unknown")
+    return resp.get("result", resp.get("status", "unknown"))
 
 
 @mcp.tool()
 async def phone_stop_app(package: str) -> str:
     """Force-stop an Android app by package name."""
     resp = await send_command("stopApp", {"package": package})
-    return resp.get("status", "unknown")
+    return resp.get("result", resp.get("status", "unknown"))
 
 
 @mcp.tool()
@@ -426,7 +444,7 @@ async def phone_get_packages(filter_keyword: str = "") -> str:
 async def phone_keep_awake(enabled: bool) -> str:
     """Enable or disable keep-screen-awake. enabled=True prevents screen off."""
     resp = await send_command("keepAwake", {"enabled": enabled})
-    return resp.get("status", "unknown")
+    return resp.get("result", resp.get("status", "unknown"))
 
 
 @mcp.tool()
