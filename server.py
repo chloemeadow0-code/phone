@@ -95,18 +95,63 @@ def compress_screenshot(b64, max_width=720, quality=60):
     try:
         img_bytes = base64.b64decode(b64)
         img = Image.open(io.BytesIO(img_bytes))
-
         if img.width > max_width:
             ratio = max_width / img.width
             new_size = (max_width, int(img.height * ratio))
             img = img.resize(new_size, Image.LANCZOS)
-
         buf = io.BytesIO()
         img.convert("RGB").save(buf, format="JPEG", quality=quality, optimize=True)
         return base64.b64encode(buf.getvalue()).decode()
     except Exception as e:
         log.warning("Image compression failed: %s, returning original", e)
         return b64
+
+
+def parse_nodes(tree, text_filter="", class_filter="", clickable_only=False):
+    """
+    递归遍历 Portal 返回的无障碍树，提取节点列表。
+    Portal 字段名: boundsInScreen, isClickable, isEditable 等。
+    """
+    matches = []
+
+    def walk(node):
+        if not isinstance(node, dict):
+            return
+        node_text = node.get("text", "") or node.get("contentDescription", "") or ""
+        node_class = node.get("className", "") or ""
+        is_clickable = node.get("isClickable", False)
+        bounds = node.get("boundsInScreen", None)
+
+        text_match = (not text_filter) or (text_filter.lower() in node_text.lower())
+        class_match = (not class_filter) or (class_filter.lower() in node_class.lower())
+        click_match = (not clickable_only) or is_clickable
+
+        if text_match and class_match and click_match and bounds:
+            left = bounds.get("left", 0)
+            top = bounds.get("top", 0)
+            right = bounds.get("right", 0)
+            bottom = bounds.get("bottom", 0)
+            if right > left and bottom > top:
+                matches.append({
+                    "text": node_text,
+                    "class": node_class,
+                    "clickable": is_clickable,
+                    "editable": node.get("isEditable", False),
+                    "bounds": bounds,
+                    "center_x": (left + right) // 2,
+                    "center_y": (top + bottom) // 2,
+                })
+
+        for child in node.get("children", []):
+            walk(child)
+
+    if isinstance(tree, list):
+        for n in tree:
+            walk(n)
+    else:
+        walk(tree)
+
+    return matches
 
 
 # ─────────────────────────── WebSocket reader ──────────────────
@@ -139,7 +184,6 @@ async def reader(ws):
                     except UnicodeDecodeError:
                         log.warning("Binary frame: cannot decode id prefix, skipping.")
                         continue
-
                     if rid in pending:
                         fut = pending[rid]
                         if not fut.done():
@@ -218,21 +262,15 @@ async def phone_analyze_screen(question: str = "描述当前屏幕上显示的�
     screenshot_b64 = await phone_screenshot()
     if not screenshot_b64:
         return "截图失败，无法分析屏幕"
-
     resp = await _vision_client.chat.completions.create(
         model="ep-20260421160843-l48q6",
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": "data:image/jpeg;base64," + screenshot_b64},
-                    },
-                    {"type": "text", "text": question},
-                ],
-            }
-        ],
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + screenshot_b64}},
+                {"type": "text", "text": question},
+            ],
+        }],
     )
     return resp.choices[0].message.content
 
@@ -252,23 +290,16 @@ async def phone_tap_by_description(target: str) -> str:
         "只返回JSON，格式: {\"x\": 数字, \"y\": 数字, \"found\": true/false, \"reason\": \"说明\"}"
         "坐标单位是像素，原点在左上角。如果找不到，found返回false。"
     )
-
     resp = await _vision_client.chat.completions.create(
         model="ep-20260421160843-l48q6",
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": "data:image/jpeg;base64," + screenshot_b64},
-                    },
-                    {"type": "text", "text": prompt},
-                ],
-            }
-        ],
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + screenshot_b64}},
+                {"type": "text", "text": prompt},
+            ],
+        }],
     )
-
     raw = resp.choices[0].message.content.strip()
     try:
         clean = raw.replace("```json", "").replace("```", "").strip()
@@ -315,7 +346,7 @@ async def phone_input_text(text: str) -> str:
 
 @mcp.tool()
 async def phone_press_key(key_code: int) -> str:
-    """Press an Android key by its key code. Common: 3=HOME 4=BACK 66=ENTER."""
+    """Press an Android key by its key code. Common: 3=HOME 4=BACK 66=ENTER 67=BACKSPACE."""
     resp = await send_command("pressKey", {"keyCode": key_code})
     return resp.get("status", "unknown")
 
@@ -351,16 +382,16 @@ async def phone_stop_app(package: str) -> str:
 @mcp.tool()
 async def phone_get_state(max_chars: int = 6000) -> str:
     """
-    Retrieve the current accessibility tree (UI hierarchy) of the screen.
-    max_chars: truncate result to avoid context overflow (default 6000).
+    获取当前屏幕完整状态，包含无障碍树和手机状态（当前App、键盘是否可见等）。
+    max_chars: 截断长度，避免上下文溢出（默认6000）。
+    Portal方法: state
     """
-    resp = await send_command("getState", {})
+    resp = await send_command("state", {})
     result = resp.get("result", "")
     if isinstance(result, (dict, list)):
         text = json.dumps(result, ensure_ascii=False)
     else:
         text = str(result)
-
     if len(text) > max_chars:
         text = text[:max_chars] + "\n...[truncated, {} chars total]".format(len(text))
     return text
@@ -369,24 +400,20 @@ async def phone_get_state(max_chars: int = 6000) -> str:
 @mcp.tool()
 async def phone_get_packages(filter_keyword: str = "") -> str:
     """
-    Get installed app packages.
-    filter_keyword: optional keyword to filter (e.g. 'com.tencent').
-    Returns at most 100 results to avoid context overflow.
+    获取已安装应用列表。
+    filter_keyword: 过滤关键词，如 com.tencent，留空返回前100个。
     """
-    resp = await send_command("getPackages", {})
+    resp = await send_command("packages", {})
     result = resp.get("result", [])
     if isinstance(result, str):
         try:
             result = json.loads(result)
         except Exception:
             return result
-
     if not isinstance(result, list):
         return str(result)
-
     if filter_keyword:
         result = [p for p in result if filter_keyword.lower() in str(p).lower()]
-
     total = len(result)
     truncated = result[:100]
     out = json.dumps(truncated, ensure_ascii=False)
@@ -405,54 +432,16 @@ async def phone_keep_awake(enabled: bool) -> str:
 @mcp.tool()
 async def phone_find_elements(text: str = "", class_name: str = "", clickable_only: bool = False) -> str:
     """
-    从无障碍树中搜索元素，返回匹配的节点列表（含坐标）。
-    text: 按文字内容匹配（模糊）
+    从无障碍树中搜索元素，返回匹配节点列表（含中心坐标）。
+    text: 按文字内容模糊匹配
     class_name: 按类名匹配，如 android.widget.Button
-    clickable_only: 只返回可点击的元素
+    clickable_only: 只返回可点击元素
     """
-    resp = await send_command("getState", {})
-    result = resp.get("result", "")
-    if isinstance(result, str):
-        try:
-            tree = json.loads(result)
-        except Exception:
-            return "无法解析无障碍树"
-    else:
-        tree = result
+    resp = await send_command("state", {})
+    result = resp.get("result", {})
+    tree = result.get("a11y_tree", result) if isinstance(result, dict) else result
 
-    matches = []
-
-    def walk(node):
-        if not isinstance(node, dict):
-            return
-        node_text = node.get("text", "") or node.get("contentDescription", "") or ""
-        node_class = node.get("className", "") or ""
-        is_clickable = node.get("clickable", False)
-        bounds = node.get("bounds", None)
-
-        text_match = (not text) or (text.lower() in node_text.lower())
-        class_match = (not class_name) or (class_name.lower() in node_class.lower())
-        click_match = (not clickable_only) or is_clickable
-
-        if text_match and class_match and click_match and bounds:
-            matches.append({
-                "text": node_text,
-                "class": node_class,
-                "clickable": is_clickable,
-                "bounds": bounds,
-                "center_x": (bounds["left"] + bounds["right"]) // 2,
-                "center_y": (bounds["top"] + bounds["bottom"]) // 2,
-            })
-
-        for child in node.get("children", []):
-            walk(child)
-
-    if isinstance(tree, list):
-        for n in tree:
-            walk(n)
-    else:
-        walk(tree)
-
+    matches = parse_nodes(tree, text_filter=text, class_filter=class_name, clickable_only=clickable_only)
     if not matches:
         return "未找到匹配元素"
     return json.dumps(matches[:20], ensure_ascii=False)
@@ -464,50 +453,15 @@ async def phone_click_element(text: str = "", class_name: str = "", index: int =
     在无障碍树中找到元素并点击其中心坐标。
     text: 按文字内容匹配
     class_name: 按类名匹配
-    index: 有多个匹配时选第几个（从0开始）
+    index: 多个匹配时选第几个（从0开始）
     """
-    resp = await send_command("getState", {})
-    result = resp.get("result", "")
-    if isinstance(result, str):
-        try:
-            tree = json.loads(result)
-        except Exception:
-            return "无法解析无障碍树"
-    else:
-        tree = result
+    resp = await send_command("state", {})
+    result = resp.get("result", {})
+    tree = result.get("a11y_tree", result) if isinstance(result, dict) else result
 
-    matches = []
-
-    def walk(node):
-        if not isinstance(node, dict):
-            return
-        node_text = node.get("text", "") or node.get("contentDescription", "") or ""
-        node_class = node.get("className", "") or ""
-        bounds = node.get("bounds", None)
-
-        text_match = (not text) or (text.lower() in node_text.lower())
-        class_match = (not class_name) or (class_name.lower() in node_class.lower())
-
-        if text_match and class_match and bounds:
-            matches.append({
-                "text": node_text,
-                "bounds": bounds,
-                "center_x": (bounds["left"] + bounds["right"]) // 2,
-                "center_y": (bounds["top"] + bounds["bottom"]) // 2,
-            })
-
-        for child in node.get("children", []):
-            walk(child)
-
-    if isinstance(tree, list):
-        for n in tree:
-            walk(n)
-    else:
-        walk(tree)
-
+    matches = parse_nodes(tree, text_filter=text, class_filter=class_name)
     if not matches:
-        return "未找到元素: text=\"" + text + "\" class=\"" + class_name + "\""
-
+        return "未找到元素: text=\"{}\" class=\"{}\"".format(text, class_name)
     if index >= len(matches):
         return "index={} 超出范围，共找到 {} 个匹配".format(index, len(matches))
 
@@ -523,26 +477,20 @@ async def phone_click_element(text: str = "", class_name: str = "", index: int =
 @mcp.tool()
 async def phone_click_element_by_index(overlay_index: int) -> str:
     """
-    Portal App 叠加层会给每个可交互元素编号（屏幕上显示的数字标签）。
-    直接传入叠加层上显示的数字来点击对应元素。
-    overlay_index: 屏幕上叠加层显示的数字
+    通过 Portal App 叠加层显示的数字编号点击对应元素。
+    overlay_index: 屏幕叠加层上显示的数字
     """
-    resp = await send_command("getState", {})
-    result = resp.get("result", "")
-    if isinstance(result, str):
-        try:
-            tree = json.loads(result)
-        except Exception:
-            return "无法解析无障碍树"
-    else:
-        tree = result
+    resp = await send_command("state", {})
+    result = resp.get("result", {})
+    tree = result.get("a11y_tree", result) if isinstance(result, dict) else result
 
     matches = []
 
     def walk(node):
         if not isinstance(node, dict):
             return
-        if node.get("index") == overlay_index or node.get("overlayIndex") == overlay_index:
+        idx = node.get("overlayIndex", node.get("index", None))
+        if idx == overlay_index:
             matches.append(node)
         for child in node.get("children", []):
             walk(child)
@@ -557,7 +505,7 @@ async def phone_click_element_by_index(overlay_index: int) -> str:
         return "未找到叠加层编号 {} 的元素".format(overlay_index)
 
     node = matches[0]
-    bounds = node.get("bounds", {})
+    bounds = node.get("boundsInScreen", {})
     x = (bounds.get("left", 0) + bounds.get("right", 0)) // 2
     y = (bounds.get("top", 0) + bounds.get("bottom", 0)) // 2
     tap_resp = await send_command("tap", {"x": x, "y": y})
